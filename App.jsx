@@ -58,11 +58,8 @@ async function todoistReq(method, path, body = null) {
 
 async function getOrCreateProject() {
   const res = await todoistReq("GET", "/projects");
-  const projects = Array.isArray(res) ? res : (res.results || res.items || []);
-  const existing = projects.find(p => p.name === TODOIST_PROJECT_NAME);
-  if (existing) return existing.id;
-  const created = await todoistReq("POST", "/projects", { name: TODOIST_PROJECT_NAME });
-  return created.id;
+  // Log the raw response so we can see the exact shape
+  throw new Error("RAW PROJECTS RESPONSE: " + JSON.stringify(res).slice(0, 300));
 }
 
 // ─── Main Component ───────────────────────────────────────────────────────────
