@@ -1,7 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 
 const ANTHROPIC_KEY = import.meta.env.VITE_ANTHROPIC_API_KEY;
-const TODOIST_TOKEN = import.meta.env.VITE_TODOIST_API_TOKEN;
 const TODOIST_PROJECT_NAME = "🛒 Grocery List";
 
 const SYSTEM_PROMPT = `You are Nourish, a warm and knowledgeable household dinner & grocery assistant for Seb and his wife. You help them plan meals (Seb follows a vegetarian diet — his wife may or may not), maintain a shared grocery list via Todoist, and suggest new recipes.
@@ -43,19 +42,15 @@ function cleanResponse(text) {
     .trim();
 }
 
-// ─── Todoist API ──────────────────────────────────────────────────────────────
+// ─── Todoist via proxy ────────────────────────────────────────────────────────
 
 async function todoistReq(method, path, body = null) {
-  const opts = {
-    method,
-    headers: {
-      Authorization: `Bearer ${TODOIST_TOKEN}`,
-      "Content-Type": "application/json",
-    },
-  };
-  if (body) opts.body = JSON.stringify(body);
-  const res = await fetch(`https://api.todoist.com/rest/v2${path}`, opts);
-  if (!res.ok) throw new Error(`Todoist ${res.status}`);
+  const res = await fetch("/api/todoist", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ method, path, body }),
+  });
+  if (!res.ok) throw new Error(`Todoist proxy ${res.status}`);
   if (res.status === 204) return null;
   return res.json();
 }
@@ -89,7 +84,7 @@ export default function Nourish() {
   });
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
-  const [syncStatus, setSyncStatus] = useState("idle"); // idle | syncing | error
+  const [syncStatus, setSyncStatus] = useState("idle");
   const [activeTab, setActiveTab] = useState("chat");
   const [newGrocery, setNewGrocery] = useState("");
   const messagesEndRef = useRef(null);
@@ -111,9 +106,7 @@ export default function Nourish() {
     }
   }, []);
 
-  // Init: get/create Todoist project
   useEffect(() => {
-    if (!TODOIST_TOKEN) return;
     getOrCreateProject()
       .then(pid => { setProjectId(pid); loadTasks(pid); })
       .catch(() => setSyncStatus("error"));
@@ -207,8 +200,6 @@ User message: `;
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); }
   };
 
-  // ─── Render ─────────────────────────────────────────────────────────────────
-
   return (
     <div style={{
       fontFamily: "'Georgia', 'Times New Roman', serif",
@@ -234,17 +225,13 @@ User message: `;
           <div>
             <div style={{ fontSize: 22, fontWeight: 700 }}>Nourish</div>
             <div style={{ fontSize: 11, opacity: 0.7, fontStyle: "italic", fontFamily: "sans-serif", display: "flex", alignItems: "center", gap: 4 }}>
-              <span style={{ width: 6, height: 6, borderRadius: "50%", background: syncStatus === "error" ? "#e07070" : "#7ab87a", display: "inline-block" }} />
+              <span style={{ width: 6, height: 6, borderRadius: "50%", background: syncStatus === "error" ? "#e07070" : syncStatus === "syncing" ? "#e0c070" : "#7ab87a", display: "inline-block" }} />
               {syncStatus === "syncing" ? "syncing with Todoist…" : syncStatus === "error" ? "Todoist sync error" : "synced with Todoist"}
             </div>
           </div>
           <div style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
-            <div style={{ background: "rgba(255,255,255,0.15)", borderRadius: 20, padding: "4px 10px", fontSize: 11, fontFamily: "sans-serif" }}>
-              🛒 {tasks.length}
-            </div>
-            <div style={{ background: "rgba(255,255,255,0.15)", borderRadius: 20, padding: "4px 10px", fontSize: 11, fontFamily: "sans-serif" }}>
-              🍽️ {meals.length}
-            </div>
+            <div style={{ background: "rgba(255,255,255,0.15)", borderRadius: 20, padding: "4px 10px", fontSize: 11, fontFamily: "sans-serif" }}>🛒 {tasks.length}</div>
+            <div style={{ background: "rgba(255,255,255,0.15)", borderRadius: 20, padding: "4px 10px", fontSize: 11, fontFamily: "sans-serif" }}>🍽️ {meals.length}</div>
           </div>
         </div>
         <div style={{ display: "flex", gap: 2 }}>
@@ -306,8 +293,7 @@ User message: `;
           </div>
 
           <div style={{ padding: "8px 16px 20px", display: "flex", gap: 8 }}>
-            <textarea
-              value={input} onChange={e => setInput(e.target.value)} onKeyDown={handleKeyDown}
+            <textarea value={input} onChange={e => setInput(e.target.value)} onKeyDown={handleKeyDown}
               placeholder="Ask about dinner, recipes, or groceries…" rows={1}
               style={{
                 flex: 1, padding: "12px 14px", borderRadius: 24,
@@ -350,7 +336,9 @@ User message: `;
                 padding: "4px 10px", fontSize: 12, cursor: "pointer", color: "#6b5a47", fontFamily: "sans-serif",
               }}>↻ Refresh</button>
             </div>
-            {tasks.length === 0 ? (
+            {syncStatus === "syncing" ? (
+              <div style={{ color: "#a09080", fontStyle: "italic", fontSize: 14, textAlign: "center", padding: "20px 0" }}>Loading from Todoist…</div>
+            ) : tasks.length === 0 ? (
               <div style={{ color: "#a09080", fontStyle: "italic", fontSize: 14, textAlign: "center", padding: "20px 0" }}>
                 Empty — ask Nourish to add items, or add them above!
               </div>
@@ -367,10 +355,9 @@ User message: `;
                       <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#7ab87a" }} />
                       <span style={{ fontSize: 14, color: "#2a2a2a" }}>{task.content}</span>
                     </div>
-                    <button onClick={() => completeTask(task.id)} title="Mark as got it" style={{
+                    <button onClick={() => completeTask(task.id)} style={{
                       background: "none", border: "1px solid #d4c9b4", borderRadius: 6,
-                      cursor: "pointer", color: "#4a9060", fontSize: 13, padding: "2px 8px",
-                      fontFamily: "sans-serif",
+                      cursor: "pointer", color: "#4a9060", fontSize: 13, padding: "2px 8px", fontFamily: "sans-serif",
                     }}>✓</button>
                   </div>
                 ))}
@@ -422,7 +409,6 @@ User message: `;
         * { box-sizing: border-box; }
         ::-webkit-scrollbar { width: 4px; }
         ::-webkit-scrollbar-thumb { background: #c8b89a; border-radius: 4px; }
-        textarea { field-sizing: content; }
       `}</style>
     </div>
   );
