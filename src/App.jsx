@@ -45,7 +45,7 @@ function cleanResponse(text) {
 // ─── Todoist via proxy ────────────────────────────────────────────────────────
 
 async function todoistReq(method, path, body = null) {
-  const res = await fetch("/api/todoist", {
+  const res = await fetch("/api/claude", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ method, path, body }),
