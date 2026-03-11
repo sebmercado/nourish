@@ -195,8 +195,8 @@ User message: `;
       if (commands.addMeals.length > 0) setMeals(prev => [...new Set([...prev, ...commands.addMeals])]);
 
       setMessages([...newMessages, { role: "assistant", content: cleanText }]);
-    } catch {
-      setMessages([...newMessages, { role: "assistant", content: "Something went wrong — please try again!" }]);
+    } catch(e) {
+      setMessages([...newMessages, { role: "assistant", content: "Error: " + e.message }]);
     }
     setLoading(false);
   };
