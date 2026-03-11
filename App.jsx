@@ -57,7 +57,8 @@ async function todoistReq(method, path, body = null) {
 }
 
 async function getOrCreateProject() {
-  const projects = await todoistReq("GET", "/projects");
+  const res = await todoistReq("GET", "/projects");
+  const projects = Array.isArray(res) ? res : (res.results || res.items || []);
   const existing = projects.find(p => p.name === TODOIST_PROJECT_NAME);
   if (existing) return existing.id;
   const created = await todoistReq("POST", "/projects", { name: TODOIST_PROJECT_NAME });
@@ -100,7 +101,8 @@ export default function Nourish() {
   const loadTasks = useCallback(async (pid) => {
     setSyncStatus("syncing");
     try {
-      const data = await todoistReq("GET", `/tasks?project_id=${pid}`);
+      const res = await todoistReq("GET", `/tasks?project_id=${pid}`);
+      const data = Array.isArray(res) ? res : (res.results || res.items || []);
       setTasks(data.map(t => ({ id: t.id, content: t.content })));
       setSyncStatus("idle");
     } catch(e) {
