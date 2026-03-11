@@ -50,9 +50,10 @@ async function todoistReq(method, path, body = null) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ method, path, body }),
   });
-  if (!res.ok) throw new Error(`Todoist proxy ${res.status}`);
+  const text = await res.text();
+  if (!res.ok) throw new Error(`HTTP ${res.status}: ${text}`);
   if (res.status === 204) return null;
-  return res.json();
+  try { return JSON.parse(text); } catch { throw new Error(`Bad JSON: ${text}`); }
 }
 
 async function getOrCreateProject() {
@@ -85,6 +86,7 @@ export default function Nourish() {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [syncStatus, setSyncStatus] = useState("idle");
+  const [syncError, setSyncError] = useState("");
   const [activeTab, setActiveTab] = useState("chat");
   const [newGrocery, setNewGrocery] = useState("");
   const messagesEndRef = useRef(null);
@@ -101,15 +103,16 @@ export default function Nourish() {
       const data = await todoistReq("GET", `/tasks?project_id=${pid}`);
       setTasks(data.map(t => ({ id: t.id, content: t.content })));
       setSyncStatus("idle");
-    } catch {
+    } catch(e) {
       setSyncStatus("error");
+      setSyncError(e.message);
     }
   }, []);
 
   useEffect(() => {
     getOrCreateProject()
       .then(pid => { setProjectId(pid); loadTasks(pid); })
-      .catch(() => setSyncStatus("error"));
+      .catch(e => { setSyncStatus("error"); setSyncError(e.message); });
   }, [loadTasks]);
 
   const addToTodoist = async (items) => {
@@ -226,7 +229,7 @@ User message: `;
             <div style={{ fontSize: 22, fontWeight: 700 }}>Nourish</div>
             <div style={{ fontSize: 11, opacity: 0.7, fontStyle: "italic", fontFamily: "sans-serif", display: "flex", alignItems: "center", gap: 4 }}>
               <span style={{ width: 6, height: 6, borderRadius: "50%", background: syncStatus === "error" ? "#e07070" : syncStatus === "syncing" ? "#e0c070" : "#7ab87a", display: "inline-block" }} />
-              {syncStatus === "syncing" ? "syncing with Todoist…" : syncStatus === "error" ? "Todoist sync error" : "synced with Todoist"}
+              {syncStatus === "syncing" ? "syncing with Todoist…" : syncStatus === "error" ? `Error: ${syncError}` : "synced with Todoist"}
             </div>
           </div>
           <div style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
