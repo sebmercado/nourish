@@ -2,7 +2,8 @@ import { useState, useEffect, useRef, useCallback } from "react";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const TODOIST_PROJECT_NAME = "🛒 Grocery List";
+const GROCERY_PROJECT_NAME = "🛒 Grocery List";
+const MEALS_PROJECT_NAME = "🍽️ Meal Memory";
 
 const SYSTEM_PROMPT = `You are Nourish, a warm household dinner and grocery assistant for Seb and his wife. Seb is vegetarian and loves Mediterranean and Greek-inspired cooking — things like spanakopita, tzatziki, roasted lemon potatoes, falafel, halloumi. His wife may eat meat.
 
@@ -10,13 +11,15 @@ You will receive at the start of each message:
 - GROCERY_LIST: what's currently on their Todoist grocery list
 - MEAL_HISTORY: meals they've cooked before
 
-Help them with dinner ideas, recipes, and managing the grocery list. Be warm and concise.
+Help them with dinner ideas, recipes, and managing the grocery list.
+
+Tone and length: Keep responses very short and clear. One brief sentence of warmth at most, then get straight to the point. The user reads your replies on a small phone screen in a grocery store with a baby — short sentences and plain language only. Never write long paragraphs.
 
 When you need to update the grocery list or log a meal, add these commands at the very end of your reply (after everything else):
 
 [GROCERY_ADD: item1 | item2 | item3]
 [GROCERY_REMOVE: item1 | item2]
-[MEAL_ADD: Meal Name]
+[MEAL_ADD: meal1 | meal2 | meal3]
 
 Only include commands you actually need. Never explain or mention the commands.`;
 
@@ -27,9 +30,10 @@ function parseCommands(text) {
   const addMatch = text.match(/\[GROCERY_ADD:\s*([^\]]+)\]/);
   const removeMatch = text.match(/\[GROCERY_REMOVE:\s*([^\]]+)\]/);
   const mealMatch = text.match(/\[MEAL_ADD:\s*([^\]]+)\]/);
+  // All three split by | so multiple items work correctly
   if (addMatch) result.add = addMatch[1].split("|").map(s => s.trim()).filter(Boolean);
   if (removeMatch) result.remove = removeMatch[1].split("|").map(s => s.trim()).filter(Boolean);
-  if (mealMatch) result.meals = [mealMatch[1].trim()];
+  if (mealMatch) result.meals = mealMatch[1].split("|").map(s => s.trim()).filter(Boolean);
   return result;
 }
 
@@ -41,6 +45,17 @@ function stripCommands(text) {
     .trim();
 }
 
+// Deduplicate an array of strings case-insensitively, preserving original casing
+function dedupeStrings(arr) {
+  const seen = new Set();
+  return arr.filter(item => {
+    const key = item.toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 // ─── API calls (via Vercel proxy functions) ───────────────────────────────────
 
 async function todoistCall(method, path, body = null) {
@@ -50,7 +65,7 @@ async function todoistCall(method, path, body = null) {
     body: JSON.stringify({ method, path, body }),
   });
   const text = await res.text();
-  if (!text) return null; // 204 No Content
+  if (!text) return null;
   const data = JSON.parse(text);
   if (!res.ok) throw new Error(data.error || `Todoist error ${res.status}`);
   return data;
@@ -74,13 +89,12 @@ async function claudeCall(messages) {
 
 // ─── Todoist helpers ──────────────────────────────────────────────────────────
 
-async function getOrCreateProject() {
+async function getOrCreateProject(name) {
   const data = await todoistCall("GET", "/projects");
-  // Todoist v1 returns { results: [...] }
   const projects = data.results || [];
-  const existing = projects.find(p => p.name === TODOIST_PROJECT_NAME);
+  const existing = projects.find(p => p.name === name);
   if (existing) return existing.id;
-  const created = await todoistCall("POST", "/projects", { name: TODOIST_PROJECT_NAME });
+  const created = await todoistCall("POST", "/projects", { name });
   return created.id;
 }
 
@@ -99,7 +113,7 @@ async function completeTask(taskId) {
   await todoistCall("POST", `/tasks/${taskId}/complete`);
 }
 
-// ─── Persistence ──────────────────────────────────────────────────────────────
+// ─── Local persistence (chat history only) ───────────────────────────────────
 
 function loadLocal(key, fallback) {
   try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch { return fallback; }
@@ -113,40 +127,52 @@ function saveLocal(key, value) {
 
 const INITIAL_MESSAGE = {
   role: "assistant",
-  content: "Hi! I'm Nourish 🌿 Your grocery list is synced with Todoist so both you and your wife can see it. What can I help with — dinner ideas, a recipe, or the shopping list?",
+  content: "Hi! I'm Nourish 🌿 Your grocery list and meal memory are both synced with Todoist — shared between you and your wife. What can I help with?",
 };
 
 export default function App() {
   const [tab, setTab] = useState("chat");
-  const [projectId, setProjectId] = useState(null);
+
+  const [groceryProjectId, setGroceryProjectId] = useState(null);
   const [tasks, setTasks] = useState([]);
-  const [meals, setMeals] = useState(() => loadLocal("nourish_meals", []));
+
+  const [mealsProjectId, setMealsProjectId] = useState(null);
+  const [meals, setMeals] = useState([]);
+
   const [messages, setMessages] = useState(() => {
     const saved = loadLocal("nourish_chat", []);
     return saved.length > 0 ? saved : [INITIAL_MESSAGE];
   });
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
-  const [syncState, setSyncState] = useState("loading"); // loading | ok | error
+  const [syncState, setSyncState] = useState("loading");
   const [syncError, setSyncError] = useState("");
   const [newItem, setNewItem] = useState("");
   const bottomRef = useRef(null);
 
-  // Persist meals and chat
-  useEffect(() => saveLocal("nourish_meals", meals), [meals]);
-  useEffect(() => { if (messages.length) saveLocal("nourish_chat", messages.slice(-40)); }, [messages]);
+  // Use refs to always have latest tasks/meals inside callbacks without stale closure issues
+  const tasksRef = useRef(tasks);
+  const mealsRef = useRef(meals);
+  useEffect(() => { tasksRef.current = tasks; }, [tasks]);
+  useEffect(() => { mealsRef.current = meals; }, [meals]);
 
-  // Scroll to bottom on new messages
+  useEffect(() => { if (messages.length) saveLocal("nourish_chat", messages.slice(-40)); }, [messages]);
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, sending]);
 
-  // Init Todoist on mount
+  // Init both Todoist projects on mount
   useEffect(() => {
     (async () => {
       try {
-        const pid = await getOrCreateProject();
-        const initialTasks = await fetchTasks(pid);
-        setProjectId(pid);
+        const gid = await getOrCreateProject(GROCERY_PROJECT_NAME);
+        const mid = await getOrCreateProject(MEALS_PROJECT_NAME);
+        const [initialTasks, initialMeals] = await Promise.all([
+          fetchTasks(gid),
+          fetchTasks(mid),
+        ]);
+        setGroceryProjectId(gid);
+        setMealsProjectId(mid);
         setTasks(initialTasks);
+        setMeals(initialMeals);
         setSyncState("ok");
       } catch (e) {
         setSyncState("error");
@@ -155,43 +181,62 @@ export default function App() {
     })();
   }, []);
 
-  const refresh = useCallback(async () => {
-    if (!projectId) return;
+  const refreshAll = useCallback(async () => {
+    if (!groceryProjectId || !mealsProjectId) return;
     setSyncState("loading");
     try {
-      const updated = await fetchTasks(projectId);
-      setTasks(updated);
+      const [updatedTasks, updatedMeals] = await Promise.all([
+        fetchTasks(groceryProjectId),
+        fetchTasks(mealsProjectId),
+      ]);
+      setTasks(updatedTasks);
+      setMeals(updatedMeals);
       setSyncState("ok");
     } catch (e) {
       setSyncState("error");
       setSyncError(e.message);
     }
-  }, [projectId]);
+  }, [groceryProjectId, mealsProjectId]);
 
-  const addItems = useCallback(async (items) => {
-    if (!projectId) return;
-    for (const content of items) {
+  // Add grocery items — uses ref for up-to-date list, dedupes incoming items
+  const addGroceryItems = useCallback(async (items, projectId) => {
+    const pid = projectId || groceryProjectId;
+    if (!pid) return;
+    const uniqueItems = dedupeStrings(items);
+    for (const content of uniqueItems) {
+      // Check against latest tasks via ref to avoid stale state
+      const alreadyExists = tasksRef.current.find(
+        t => t.content.toLowerCase() === content.toLowerCase()
+      );
+      if (alreadyExists) continue;
       try {
-        const task = await createTask(projectId, content);
+        const task = await createTask(pid, content);
+        // Update both state and ref immediately
         setTasks(prev => {
-          // Avoid duplicates
-          if (prev.find(t => t.content.toLowerCase() === content.toLowerCase())) return prev;
-          return [...prev, task];
+          const updated = [...prev, task];
+          tasksRef.current = updated;
+          return updated;
         });
       } catch {}
     }
-  }, [projectId]);
+  }, [groceryProjectId]);
 
-  const removeItems = useCallback(async (names) => {
+  const removeGroceryItems = useCallback(async (names) => {
     for (const name of names) {
-      const match = tasks.find(t => t.content.toLowerCase().includes(name.toLowerCase()));
+      const match = tasksRef.current.find(
+        t => t.content.toLowerCase().includes(name.toLowerCase())
+      );
       if (!match) continue;
       try {
         await completeTask(match.id);
-        setTasks(prev => prev.filter(t => t.id !== match.id));
+        setTasks(prev => {
+          const updated = prev.filter(t => t.id !== match.id);
+          tasksRef.current = updated;
+          return updated;
+        });
       } catch {}
     }
-  }, [tasks]);
+  }, []);
 
   const tickTask = useCallback(async (id) => {
     try {
@@ -199,6 +244,40 @@ export default function App() {
       setTasks(prev => prev.filter(t => t.id !== id));
     } catch {}
   }, []);
+
+  // Add meals — uses ref for up-to-date list, dedupes incoming meals
+  const addMeals = useCallback(async (mealNames, projectId) => {
+    const pid = projectId || mealsProjectId;
+    if (!pid) return;
+    const uniqueNames = dedupeStrings(mealNames);
+    for (const name of uniqueNames) {
+      const alreadyExists = mealsRef.current.find(
+        m => m.content.toLowerCase() === name.toLowerCase()
+      );
+      if (alreadyExists) continue;
+      try {
+        const task = await createTask(pid, name);
+        setMeals(prev => {
+          const updated = [...prev, task];
+          mealsRef.current = updated;
+          return updated;
+        });
+      } catch {}
+    }
+  }, [mealsProjectId]);
+
+  const removeMeal = useCallback(async (id) => {
+    try {
+      await completeTask(id);
+      setMeals(prev => prev.filter(m => m.id !== id));
+    } catch {}
+  }, []);
+
+  const addManual = async () => {
+    if (!newItem.trim()) return;
+    await addGroceryItems([newItem.trim()]);
+    setNewItem("");
+  };
 
   const send = useCallback(async () => {
     if (!input.trim() || sending) return;
@@ -210,9 +289,12 @@ export default function App() {
     const updatedMessages = [...messages, userMsg];
     setMessages(updatedMessages);
 
-    // Build context-enriched messages for Claude
-    const groceryList = tasks.length > 0 ? tasks.map(t => t.content).join(", ") : "empty";
-    const mealHistory = meals.length > 0 ? meals.slice(-20).join(", ") : "none yet";
+    const groceryList = tasksRef.current.length > 0
+      ? tasksRef.current.map(t => t.content).join(", ")
+      : "empty";
+    const mealHistory = mealsRef.current.length > 0
+      ? mealsRef.current.map(m => m.content).join(", ")
+      : "none yet";
 
     const contextualMessages = updatedMessages.map((m, i) => {
       if (i === updatedMessages.length - 1 && m.role === "user") {
@@ -229,28 +311,20 @@ export default function App() {
       const commands = parseCommands(rawReply);
       const cleanReply = stripCommands(rawReply);
 
-      if (commands.add.length > 0) await addItems(commands.add);
-      if (commands.remove.length > 0) await removeItems(commands.remove);
-      if (commands.meals.length > 0) {
-        setMeals(prev => [...new Set([...prev, ...commands.meals])]);
-      }
+      if (commands.add.length > 0) await addGroceryItems(commands.add);
+      if (commands.remove.length > 0) await removeGroceryItems(commands.remove);
+      if (commands.meals.length > 0) await addMeals(commands.meals);
 
       setMessages(prev => [...prev, { role: "assistant", content: cleanReply }]);
     } catch (e) {
-      setMessages(prev => [...prev, { role: "assistant", content: `Sorry, something went wrong: ${e.message}` }]);
+      setMessages(prev => [...prev, { role: "assistant", content: `Error: ${e.message}` }]);
     }
 
     setSending(false);
-  }, [input, sending, messages, tasks, meals, addItems, removeItems]);
+  }, [input, sending, messages, addGroceryItems, removeGroceryItems, addMeals]);
 
   const handleKey = (e) => {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
-  };
-
-  const addManual = async () => {
-    if (!newItem.trim()) return;
-    await addItems([newItem.trim()]);
-    setNewItem("");
   };
 
   // ─── Styles ─────────────────────────────────────────────────────────────────
@@ -358,7 +432,7 @@ export default function App() {
               <div style={{ fontSize: 16, fontWeight: 700, color: "#2d4a3e" }}>
                 Shopping List {tasks.length > 0 && <span style={{ fontSize: 13, fontWeight: 400, color: "#8b7355" }}>({tasks.length})</span>}
               </div>
-              <button onClick={refresh} style={{ background: "none", border: "1px solid #d4c9b4", borderRadius: 8, padding: "4px 10px", fontSize: 12, cursor: "pointer", color: "#6b5a47", fontFamily: "sans-serif" }}>↻ Refresh</button>
+              <button onClick={refreshAll} style={{ background: "none", border: "1px solid #d4c9b4", borderRadius: 8, padding: "4px 10px", fontSize: 12, cursor: "pointer", color: "#6b5a47", fontFamily: "sans-serif" }}>↻ Refresh</button>
             </div>
             {tasks.length === 0
               ? <div style={{ color: "#a09080", fontStyle: "italic", fontSize: 14, textAlign: "center", padding: "20px 0" }}>Empty — ask Nourish or add above!</div>
@@ -382,14 +456,14 @@ export default function App() {
         <div style={{ flex: 1, padding: 16 }}>
           <div style={s.card}>
             <div style={{ fontSize: 16, fontWeight: 700, color: "#2d4a3e", marginBottom: 4 }}>Meal Memory</div>
-            <div style={{ fontSize: 13, color: "#8b7355", fontStyle: "italic", marginBottom: 14, fontFamily: "sans-serif" }}>Nourish learns from these to suggest better meals</div>
+            <div style={{ fontSize: 13, color: "#8b7355", fontStyle: "italic", marginBottom: 14, fontFamily: "sans-serif" }}>Shared with your wife via Todoist 🌿</div>
             {meals.length === 0
               ? <div style={{ color: "#a09080", fontStyle: "italic", fontSize: 14, textAlign: "center", padding: "20px 0" }}>No meals yet — chat with Nourish!</div>
               : <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-                {meals.map((meal, i) => (
-                  <div key={i} style={{ padding: "8px 14px", borderRadius: 20, background: "linear-gradient(135deg, #f0ebe0, #e8dfd0)", border: "1px solid #d4c9b4", fontSize: 13, color: "#3a2e20", display: "flex", alignItems: "center", gap: 6 }}>
-                    🍽️ {meal}
-                    <button onClick={() => setMeals(prev => prev.filter(m => m !== meal))} style={{ background: "none", border: "none", cursor: "pointer", color: "#a09080", fontSize: 12, padding: 0 }}>✕</button>
+                {meals.map((meal) => (
+                  <div key={meal.id} style={{ padding: "8px 14px", borderRadius: 20, background: "linear-gradient(135deg, #f0ebe0, #e8dfd0)", border: "1px solid #d4c9b4", fontSize: 13, color: "#3a2e20", display: "flex", alignItems: "center", gap: 6 }}>
+                    🍽️ {meal.content}
+                    <button onClick={() => removeMeal(meal.id)} style={{ background: "none", border: "none", cursor: "pointer", color: "#a09080", fontSize: 12, padding: 0 }}>✕</button>
                   </div>
                 ))}
               </div>
